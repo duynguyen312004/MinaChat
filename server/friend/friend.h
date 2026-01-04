@@ -17,6 +17,7 @@ int account_exists(const char *username);
 int friend_add_request(const char *from, const char *to);
 int friend_accept_request(const char *me, const char *from);
 int friend_reject_request(const char *me, const char *from);
+int friend_unfriend(const char *me, const char *other);
 
 // Listing
 int friend_format_friends(const char *me,

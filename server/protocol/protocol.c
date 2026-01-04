@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "../auth/auth.h"
 #include "../friend/friend.h"
+#include "../group/group.h"
 
 static void send_text(int fd, const char *msg)
 {
@@ -18,6 +19,13 @@ static void send_text(int fd, const char *msg)
 static int is_online_cb(const char *username)
 {
     return client_by_username(username) != NULL;
+}
+
+// Wrapper cho group_check_member để phù hợp với client_filter_cb signature
+static int group_member_filter(const char *username, void *userdata)
+{
+    const char *group_id = (const char *)userdata;
+    return group_check_member(group_id, username);
 }
 
 void protocol_handle(Client *c, const char *line)
@@ -247,6 +255,42 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Reject failed\n");
         return;
     }
+    if (!strcmp(cmd, "UNFRIEND"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *u = strtok(NULL, " ");
+        if (!u)
+        {
+            send_text(c->fd, "Usage: UNFRIEND <user>\n");
+            return;
+        }
+
+        if (strlen(u) >= USERNAME_LEN)
+        {
+            send_text(c->fd, "Username too long\n");
+            return;
+        }
+
+        if (strcmp(u, c->username) == 0)
+        {
+            send_text(c->fd, "Cannot unfriend yourself\n");
+            return;
+        }
+
+        int rc = friend_unfriend(c->username, u);
+        if (rc == FR_OK)
+            send_text(c->fd, "Friend removed\n");
+        else if (rc == FR_NOT_FOUND)
+            send_text(c->fd, "You are not friends with this user\n");
+        else
+            send_text(c->fd, "Unfriend failed\n");
+        return;
+    }
     if (!strcmp(cmd, "REQUESTS"))
     {
         if (!c->logged_in)
@@ -274,23 +318,6 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    if (!strcmp(cmd, "MSG"))
-    {
-        if (!c->logged_in)
-        {
-            send_text(c->fd, "Login first\n");
-            return;
-        }
-        char *msg = strtok(NULL, "");
-        if (msg && msg[0] != '\0')
-        {
-            // Broadcast message tới tất cả clients
-            char broadcast[INBUF_SIZE];
-            snprintf(broadcast, sizeof(broadcast), "[%s] %s\n", c->username, msg);
-            clients_broadcast(broadcast, NULL); // NULL = gửi cho tất cả, kể cả sender
-        }
-        return;
-    }
     if (!strcmp(cmd, "MSGTO"))
     {
         if (!c->logged_in)
@@ -347,6 +374,297 @@ void protocol_handle(Client *c, const char *line)
         char to_sender[INBUF_SIZE];
         snprintf(to_sender, sizeof(to_sender), "[PM to %s] %s\n", target, msg);
         send_text(c->fd, to_sender);
+
+        return;
+    }
+
+    // ========== GROUP COMMANDS ==========
+
+    // Command: CREATEGROUP <group_name>
+    // Tạo nhóm chat mới với tên được chỉ định
+    if (!strcmp(cmd, "CREATEGROUP"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gname = strtok(NULL, "");
+        if (!gname || strlen(gname) == 0)
+        {
+            send_text(c->fd, "Usage: CREATEGROUP <group_name>\n");
+            return;
+        }
+
+        // Xóa khoảng trắng đầu/cuối
+        while (*gname == ' ')
+            gname++;
+        int len = strlen(gname);
+        while (len > 0 && gname[len - 1] == ' ')
+        {
+            gname[len - 1] = '\0';
+            len--;
+        }
+
+        if (len == 0 || len > 100)
+        {
+            send_text(c->fd, "Group name must be 1-100 characters\n");
+            return;
+        }
+
+        char group_id[20];
+        int rc = group_create(c->username, gname, group_id, sizeof(group_id));
+
+        if (rc == GR_OK)
+        {
+            char resp[256];
+            snprintf(resp, sizeof(resp), "Group created! ID: %s\n", group_id);
+            send_text(c->fd, resp);
+        }
+        else
+        {
+            send_text(c->fd, "Failed to create group\n");
+        }
+        return;
+    }
+
+    // Command: ADDMEMBER <group_id> <username>
+    // Thêm thành viên vào nhóm (chỉ OWNER mới được phép)
+    if (!strcmp(cmd, "ADDMEMBER"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gid = strtok(NULL, " ");
+        char *target = strtok(NULL, " ");
+
+        if (!gid || !target)
+        {
+            send_text(c->fd, "Usage: ADDMEMBER <group_id> <username>\n");
+            return;
+        }
+
+        int rc = group_add_member(gid, target, c->username);
+
+        if (rc == GR_OK)
+        {
+            send_text(c->fd, "Member added successfully\n");
+
+            // Thông báo cho thành viên được thêm vào nếu đang online
+            Client *dst = client_by_username(target);
+            if (dst)
+            {
+                char note[256];
+                snprintf(note, sizeof(note), "[Server] You were added to group %s by %s\n", gid, c->username);
+                send_text(dst->fd, note);
+            }
+
+            // Thông báo cho các thành viên khác trong nhóm
+            char notify[256];
+            snprintf(notify, sizeof(notify), "[Server] %s was added to group %s\n", target, gid);
+            clients_broadcast_to_group(notify, dst, group_member_filter, (void *)gid);
+        }
+        else if (rc == GR_NOT_OWNER)
+            send_text(c->fd, "Only group owner can add members\n");
+        else if (rc == GR_ALREADY_MEMBER)
+            send_text(c->fd, "User is already a member\n");
+        else if (rc == GR_NOT_FOUND)
+            send_text(c->fd, "User not found\n");
+        else
+            send_text(c->fd, "Failed to add member\n");
+
+        return;
+    }
+
+    // Command: REMOVEMEMBER <group_id> <username>
+    // Xóa thành viên khỏi nhóm (chỉ OWNER mới được phép)
+    if (!strcmp(cmd, "REMOVEMEMBER"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gid = strtok(NULL, " ");
+        char *target = strtok(NULL, " ");
+
+        if (!gid || !target)
+        {
+            send_text(c->fd, "Usage: REMOVEMEMBER <group_id> <username>\n");
+            return;
+        }
+
+        int rc = group_remove_member(gid, target, c->username);
+
+        if (rc == GR_OK)
+        {
+            send_text(c->fd, "Member removed successfully\n");
+
+            // Thông báo cho thành viên bị xóa nếu đang online
+            Client *dst = client_by_username(target);
+            if (dst)
+            {
+                char note[256];
+                snprintf(note, sizeof(note), "[Server] You were removed from group %s\n", gid);
+                send_text(dst->fd, note);
+            }
+
+            // Thông báo cho các thành viên còn lại trong nhóm
+            char notify[256];
+            snprintf(notify, sizeof(notify), "[Server] %s was removed from group %s\n", target, gid);
+            clients_broadcast_to_group(notify, NULL, group_member_filter, (void *)gid);
+        }
+        else if (rc == GR_NOT_OWNER)
+            send_text(c->fd, "Only group owner can remove members\n");
+        else if (rc == GR_NOT_MEMBER)
+            send_text(c->fd, "User is not a member\n");
+        else
+            send_text(c->fd, "Failed to remove member\n");
+
+        return;
+    }
+
+    // Command: LEAVEGROUP <group_id>
+    // Rời khỏi nhóm chat
+    if (!strcmp(cmd, "LEAVEGROUP"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gid = strtok(NULL, " ");
+        if (!gid)
+        {
+            send_text(c->fd, "Usage: LEAVEGROUP <group_id>\n");
+            return;
+        }
+
+        int rc = group_leave(gid, c->username);
+
+        if (rc == GR_OK)
+        {
+            send_text(c->fd, "Left group successfully\n");
+
+            // Thông báo cho các thành viên còn lại trong nhóm
+            char notify[256];
+            snprintf(notify, sizeof(notify), "[Server] %s left group %s\n", c->username, gid);
+            clients_broadcast_to_group(notify, c, group_member_filter, (void *)gid);
+        }
+        else if (rc == GR_NOT_MEMBER)
+            send_text(c->fd, "You are not a member of this group\n");
+        else
+            send_text(c->fd, "Failed to leave group\n");
+
+        return;
+    }
+
+    // Command: GROUPMSG <group_id> <message>
+    // Gửi tin nhắn đến tất cả thành viên trong nhóm
+    if (!strcmp(cmd, "GROUPMSG"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gid = strtok(NULL, " ");
+        char *msg = strtok(NULL, "");
+
+        if (!gid || !msg || msg[0] == '\0')
+        {
+            send_text(c->fd, "Usage: GROUPMSG <group_id> <message>\n");
+            return;
+        }
+
+        // Kiểm tra xem người gửi có phải thành viên của nhóm không
+        if (!group_check_member(gid, c->username))
+        {
+            send_text(c->fd, "You are not a member of this group\n");
+            return;
+        }
+
+        // Format tin nhắn nhóm
+        char group_msg[INBUF_SIZE];
+        int n = snprintf(group_msg, sizeof(group_msg), "[Group %s - %s] %s\n", gid, c->username, msg);
+        if (n < 0 || (size_t)n >= sizeof(group_msg))
+        {
+            send_text(c->fd, "Message too long\n");
+            return;
+        }
+
+        // Gửi tin nhắn đến tất cả thành viên online (trừ người gửi)
+        // Sử dụng wrapper function để check membership
+        int sent_count = clients_broadcast_to_group(group_msg, c,
+                                                    group_member_filter, (void *)gid);
+
+        // Xác nhận cho người gửi
+        char confirm[256];
+        snprintf(confirm, sizeof(confirm), "[Group %s] Message sent to %d online member(s)\n", gid, sent_count);
+        send_text(c->fd, confirm);
+
+        return;
+    }
+
+    // Command: LISTGROUPS
+    // Xem danh sách các nhóm mà user đang tham gia
+    if (!strcmp(cmd, "LISTGROUPS"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char result[4096];
+        int count = group_list_user_groups(c->username, result, sizeof(result));
+
+        if (count > 0 || strlen(result) > 0)
+            send_text(c->fd, result);
+        else
+            send_text(c->fd, "You are not in any groups\n");
+
+        return;
+    }
+
+    // Command: GROUPINFO <group_id>
+    // Xem danh sách thành viên của nhóm
+    if (!strcmp(cmd, "GROUPINFO"))
+    {
+        if (!c->logged_in)
+        {
+            send_text(c->fd, "Login first\n");
+            return;
+        }
+
+        char *gid = strtok(NULL, " ");
+        if (!gid)
+        {
+            send_text(c->fd, "Usage: GROUPINFO <group_id>\n");
+            return;
+        }
+
+        // Kiểm tra xem user có phải thành viên không
+        if (!group_check_member(gid, c->username))
+        {
+            send_text(c->fd, "You are not a member of this group\n");
+            return;
+        }
+
+        char result[4096];
+        int count = group_list_members(gid, result, sizeof(result));
+
+        if (count > 0 || strlen(result) > 0)
+            send_text(c->fd, result);
+        else
+            send_text(c->fd, "Group not found\n");
 
         return;
     }

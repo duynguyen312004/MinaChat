@@ -117,6 +117,25 @@ void clients_broadcast(const char *msg, Client *exclude)
     }
 }
 
+int clients_broadcast_to_group(const char *msg, Client *sender, client_filter_cb filter, void *userdata)
+{
+    int len = strlen(msg);
+    int count = 0;
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (clients[i].fd != -1 && clients[i].logged_in && &clients[i] != sender)
+        {
+            // Kiểm tra xem client này có được nhận message không
+            if (filter && filter(clients[i].username, userdata))
+            {
+                send(clients[i].fd, msg, len, 0);
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
 int clients_format_online(char *out, size_t outsz, Client *exclude)
 {
     if (!out || outsz == 0)

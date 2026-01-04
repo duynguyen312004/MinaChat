@@ -523,6 +523,114 @@ int friend_reject_request(const char *me, const char *from)
     return rc;
 }
 
+int friend_unfriend(const char *me, const char *other)
+{
+    if (has_whitespace(me) || has_whitespace(other))
+        return FR_ERR;
+    if (strcmp(me, other) == 0)
+        return FR_ERR;
+    if (!account_exists(other))
+        return FR_NOT_FOUND;
+
+    FILE *f = NULL;
+    int fd = -1;
+    if (!open_friends_locked(O_RDWR | O_CREAT, LOCK_EX, &f, &fd))
+        return FR_ERR;
+
+    char **lines = NULL;
+    int cap = 0, n = 0;
+
+    char buf[256];
+    int removed = 0;
+
+    char ca[USERNAME_LEN], cb[USERNAME_LEN], st[32];
+    char f1[USERNAME_LEN], f2[USERNAME_LEN];
+    canon_pair(me, other, f1, f2);
+
+    rewind(f);
+    while (fgets(buf, sizeof(buf), f))
+    {
+        int drop = 0;
+
+        if (parse_friend_line(buf, ca, cb, st, sizeof(st)))
+        {
+            /* 1) Xóa FRIEND giữa me và other */
+            if (strcmp(st, "FRIEND") == 0)
+            {
+                char x[USERNAME_LEN], y[USERNAME_LEN];
+                canon_pair(ca, cb, x, y);
+                if (strcmp(x, f1) == 0 && strcmp(y, f2) == 0)
+                {
+                    drop = 1;
+                    removed = 1;
+                }
+            }
+            /* 2) Xóa mọi PENDING giữa 2 người (2 chiều) */
+            else if (strcmp(st, "PENDING") == 0)
+            {
+                if ((strcmp(ca, me) == 0 && strcmp(cb, other) == 0) ||
+                    (strcmp(ca, other) == 0 && strcmp(cb, me) == 0))
+                {
+                    drop = 1;
+                    removed = 1;
+                }
+            }
+        }
+
+        if (drop)
+            continue;
+
+        /* Giữ lại dòng */
+        if (n >= cap)
+        {
+            int newcap = (cap == 0) ? 32 : cap * 2;
+            char **tmp = realloc(lines, newcap * sizeof(char *));
+            if (!tmp)
+            {
+                for (int i = 0; i < n; i++)
+                    free(lines[i]);
+                free(lines);
+                flock(fd, LOCK_UN);
+                fclose(f);
+                return FR_ERR;
+            }
+            lines = tmp;
+            cap = newcap;
+        }
+
+        lines[n] = strdup(buf);
+        if (!lines[n])
+        {
+            for (int i = 0; i < n; i++)
+                free(lines[i]);
+            free(lines);
+            flock(fd, LOCK_UN);
+            fclose(f);
+            return FR_ERR;
+        }
+        n++;
+    }
+
+    int rc;
+    if (!removed)
+    {
+        rc = FR_NOT_FOUND; // không có quan hệ gì để xóa
+    }
+    else
+    {
+        int ok = rewrite_lines(f, fd, lines, n);
+        rc = ok ? FR_OK : FR_ERR;
+    }
+
+    for (int i = 0; i < n; i++)
+        free(lines[i]);
+    free(lines);
+
+    flock(fd, LOCK_UN);
+    fclose(f);
+    return rc;
+}
+
 // ---------- listing ----------
 
 int friend_format_friends(const char *me,

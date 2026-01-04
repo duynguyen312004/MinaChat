@@ -16,5 +16,9 @@ char *client_pop_line(Client *c); // Trả về static buffer, phải dùng ngay
 Client *client_by_username(const char *username);
 void clients_broadcast(const char *msg, Client *exclude);
 
+// Callback để kiểm tra xem username có được nhận message không
+typedef int (*client_filter_cb)(const char *username, void *userdata);
+int clients_broadcast_to_group(const char *msg, Client *sender, client_filter_cb filter, void *userdata);
+
 int clients_format_online(char *out, size_t outsz, Client *exclude); // Trả về số user đang online
 #endif
