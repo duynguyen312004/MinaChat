@@ -60,20 +60,28 @@ int main()
     printf("  REGISTER <username> <password> - Register new account\n");
     printf("  LOGIN <username> <password>    - Login to chat\n");
     printf("  LIST                           - List online users\n");
+    printf("\n");
+    printf("Friend Management:\n");
     printf("  ADDFRIEND <user>               - Send friend request\n");
     printf("  ACCEPT <user>                  - Accept friend request\n");
     printf("  REJECT <user>                  - Reject friend request\n");
     printf("  UNFRIEND <user>                - Remove friend\n");
     printf("  REQUESTS                       - View friend requests\n");
     printf("  FRIENDS                        - View friends list\n");
-    printf("  MSGTO <user> <message>         - Send private message to user\n");
+    printf("\n");
+    printf("Messaging:\n");
+    printf("  MSGTO <user> <message>         - Send private message\n");
+    printf("                                   (saved if offline)\n");
+    printf("\n");
+    printf("Group Chat:\n");
     printf("  CREATEGROUP <group_name>       - Create new group\n");
     printf("  ADDMEMBER <group_id> <user>    - Add user to group (owner only)\n");
-    printf("  REMOVEMEMBER <group_id> <user> - Remove user from group (owner only)\n");
+    printf("  REMOVEMEMBER <group_id> <user> - Remove user (owner only)\n");
     printf("  LEAVEGROUP <group_id>          - Leave a group\n");
     printf("  GROUPMSG <group_id> <message>  - Send message to group\n");
     printf("  LISTGROUPS                     - View your groups\n");
     printf("  GROUPINFO <group_id>           - View group members\n");
+    printf("\n");
     printf("  LOGOUT                         - Logout (stay connected)\n");
     printf("  exit                           - Disconnect and quit\n");
     printf("==================\n\n");
@@ -93,6 +101,20 @@ int main()
 
         if (strcmp(message, "exit") == 0)
             break;
+
+        // Hiển thị lại help menu
+        if (strcmp(message, "help") == 0)
+        {
+            printf("\n=== Available Commands ===\n");
+            printf("Account: REGISTER, LOGIN, LOGOUT\n");
+            printf("Friends: ADDFRIEND, ACCEPT, REJECT, UNFRIEND, REQUESTS, FRIENDS\n");
+            printf("Message: MSGTO <user> <message>\n");
+            printf("Group: CREATEGROUP, ADDMEMBER, REMOVEMEMBER, LEAVEGROUP\n");
+            printf("       GROUPMSG, LISTGROUPS, GROUPINFO\n");
+            printf("Other: LIST (online users), exit\n");
+            printf("==========================\n\n");
+            continue;
+        }
 
         // Gửi message tới server
         strcat(message, "\n");

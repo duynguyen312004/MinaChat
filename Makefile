@@ -9,6 +9,8 @@ SERVER_SRCS = server/server.c \
               server/client/client_mgr.c \
               server/friend/friend.c \
               server/group/group.c \
+              server/offline/offline.c \
+              server/log/log.c \
               server/protocol/protocol.c
 
 # Tên file chạy
@@ -35,7 +37,7 @@ clean:
 
 # Xóa dữ liệu
 cleandata:
-	rm -f accounts.txt friends.txt groups.txt group_members.txt requests.txt
+	rm -f accounts.txt friends.txt groups.txt group_members.txt requests.txt offline_messages.txt server.log
 
 # Xóa tất cả
 cleanall: clean cleandata

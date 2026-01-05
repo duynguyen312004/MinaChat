@@ -2,6 +2,8 @@
 #include "../auth/auth.h"
 #include "../friend/friend.h"
 #include "../group/group.h"
+#include "../offline/offline.h"
+#include "../log/log.h"
 
 static void send_text(int fd, const char *msg)
 {
@@ -75,13 +77,23 @@ void protocol_handle(Client *c, const char *line)
             c->username[USERNAME_LEN - 1] = '\0';
             send_text(c->fd, "Login OK\n");
 
-            // Thông báo cho các client khác
-            char notify[256];
-            snprintf(notify, sizeof(notify), "[Server] %s joined the chat\n", u);
-            clients_broadcast(notify, c);
+            // Log login success
+            log_login(u, 1);
+
+            // Gửi tất cả tin nhắn offline cho user
+            int offline_count = offline_deliver_messages(u, c->fd);
+            if (offline_count > 0)
+            {
+                char info[128];
+                snprintf(info, sizeof(info), "[Server] You have %d offline message(s)\n", offline_count);
+                send_text(c->fd, info);
+            }
         }
         else
+        {
             send_text(c->fd, "Login FAIL\n");
+            log_login(u, 0);
+        }
         return;
     }
 
@@ -103,9 +115,15 @@ void protocol_handle(Client *c, const char *line)
         }
 
         if (register_user(u, p))
+        {
             send_text(c->fd, "Register OK\n");
+            log_register(u, 1);
+        }
         else
+        {
             send_text(c->fd, "Register FAIL\n");
+            log_register(u, 0);
+        }
         return;
     }
 
@@ -155,6 +173,7 @@ void protocol_handle(Client *c, const char *line)
         if (rc == FR_OK)
         {
             send_text(c->fd, "Friend request sent\n");
+            log_friend_action(c->username, "REQUEST", u);
 
             // nếu user đang online, push notify (optional)
             Client *dst = client_by_username(u);
@@ -205,6 +224,7 @@ void protocol_handle(Client *c, const char *line)
         if (rc == FR_OK)
         {
             send_text(c->fd, "Friend request accepted\n");
+            log_friend_action(c->username, "ACCEPT", u);
 
             Client *dst = client_by_username(u);
             if (dst)
@@ -248,7 +268,10 @@ void protocol_handle(Client *c, const char *line)
 
         int rc = friend_reject_request(c->username, u);
         if (rc == FR_OK)
+        {
             send_text(c->fd, "Friend request rejected\n");
+            log_friend_action(c->username, "REJECT", u);
+        }
         else if (rc == FR_NOT_FOUND)
             send_text(c->fd, "No request from that user\n");
         else
@@ -284,7 +307,10 @@ void protocol_handle(Client *c, const char *line)
 
         int rc = friend_unfriend(c->username, u);
         if (rc == FR_OK)
+        {
             send_text(c->fd, "Friend removed\n");
+            log_friend_action(c->username, "UNFRIEND", u);
+        }
         else if (rc == FR_NOT_FOUND)
             send_text(c->fd, "You are not friends with this user\n");
         else
@@ -345,7 +371,23 @@ void protocol_handle(Client *c, const char *line)
         Client *dst = client_by_username(target);
         if (!dst)
         {
-            send_text(c->fd, "User not online\n");
+            // User không online, lưu tin nhắn offline
+            // Kiểm tra xem user có tồn tại không
+            if (!account_exists(target))
+            {
+                send_text(c->fd, "User does not exist\n");
+                return;
+            }
+
+            if (offline_save_message(target, c->username, msg) == 0)
+            {
+                send_text(c->fd, "Message saved (user offline)\n");
+                log_message(c->username, target, "PM_OFFLINE");
+            }
+            else
+            {
+                send_text(c->fd, "Failed to save offline message\n");
+            }
             return;
         }
 
@@ -369,6 +411,9 @@ void protocol_handle(Client *c, const char *line)
 
         // Gửi cho người nhận
         send_text(dst->fd, to_dst);
+
+        // Log message
+        log_message(c->username, target, "PM");
 
         // Xác nhận cho người gửi
         char to_sender[INBUF_SIZE];
@@ -421,6 +466,10 @@ void protocol_handle(Client *c, const char *line)
             char resp[256];
             snprintf(resp, sizeof(resp), "Group created! ID: %s\n", group_id);
             send_text(c->fd, resp);
+
+            char log_details[256];
+            snprintf(log_details, sizeof(log_details), "id=%s name=%s", group_id, gname);
+            log_group_action(c->username, "CREATE", log_details);
         }
         else
         {
@@ -453,6 +502,10 @@ void protocol_handle(Client *c, const char *line)
         if (rc == GR_OK)
         {
             send_text(c->fd, "Member added successfully\n");
+
+            char log_details[256];
+            snprintf(log_details, sizeof(log_details), "group=%s member=%s", gid, target);
+            log_group_action(c->username, "ADD_MEMBER", log_details);
 
             // Thông báo cho thành viên được thêm vào nếu đang online
             Client *dst = client_by_username(target);
@@ -504,6 +557,10 @@ void protocol_handle(Client *c, const char *line)
         if (rc == GR_OK)
         {
             send_text(c->fd, "Member removed successfully\n");
+
+            char log_details[256];
+            snprintf(log_details, sizeof(log_details), "group=%s member=%s", gid, target);
+            log_group_action(c->username, "REMOVE_MEMBER", log_details);
 
             // Thông báo cho thành viên bị xóa nếu đang online
             Client *dst = client_by_username(target);
@@ -605,6 +662,9 @@ void protocol_handle(Client *c, const char *line)
         int sent_count = clients_broadcast_to_group(group_msg, c,
                                                     group_member_filter, (void *)gid);
 
+        // Log group message
+        log_message(c->username, gid, "GROUP");
+
         // Xác nhận cho người gửi
         char confirm[256];
         snprintf(confirm, sizeof(confirm), "[Group %s] Message sent to %d online member(s)\n", gid, sent_count);
@@ -673,9 +733,7 @@ void protocol_handle(Client *c, const char *line)
     {
         if (c->logged_in)
         {
-            char notify[256];
-            snprintf(notify, sizeof(notify), "[Server] %s left the chat\n", c->username);
-            clients_broadcast(notify, c);
+            log_logout(c->username);
 
             c->logged_in = 0;
             c->username[0] = '\0';
