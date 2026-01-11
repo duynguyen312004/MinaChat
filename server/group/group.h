@@ -21,4 +21,8 @@ int group_check_member(const char *group_id, const char *username);
 int group_list_members(const char *group_id, char *out, size_t outsz);
 int group_list_user_groups(const char *username, char *out, size_t outsz);
 
+// Callback để duyệt qua từng member của group
+typedef void (*group_member_callback)(const char *username, void *userdata);
+void group_foreach_member(const char *group_id, group_member_callback callback, void *userdata);
+
 #endif

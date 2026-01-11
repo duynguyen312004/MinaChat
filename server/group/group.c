@@ -605,3 +605,32 @@ int group_list_user_groups(const char *username, char *out, size_t outsz)
     fclose(fm);
     return count;
 }
+
+// ---------- group_foreach_member ----------
+
+void group_foreach_member(const char *group_id, group_member_callback callback, void *userdata)
+{
+    if (!group_id || !callback)
+        return;
+
+    FILE *fm = NULL;
+    int fdm = -1;
+    if (!open_file_locked(GROUP_MEMBERS_FILE, O_RDONLY, LOCK_SH, &fm, &fdm))
+        return;
+
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fm))
+    {
+        char gid[GROUP_ID_LEN], user[USERNAME_LEN], role[16];
+        if (sscanf(buf, "%15[^|]|%49[^|]|%15s", gid, user, role) == 3)
+        {
+            if (strcmp(gid, group_id) == 0)
+            {
+                callback(user, userdata);
+            }
+        }
+    }
+
+    flock(fdm, LOCK_UN);
+    fclose(fm);
+}

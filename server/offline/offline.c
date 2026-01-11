@@ -128,6 +128,44 @@ int offline_save_message(const char *to_user, const char *from_user, const char 
     return 0;
 }
 
+// Lưu tin nhắn group offline
+// Format: to_user|GROUP:group_id:from_user|timestamp|message
+int offline_save_group_message(const char *to_user, const char *group_id, const char *from_user, const char *message)
+{
+    if (!to_user || !group_id || !from_user || !message)
+        return -1;
+
+    FILE *f = NULL;
+    int fd = -1;
+    if (!open_offline_locked(O_WRONLY | O_CREAT | O_APPEND, LOCK_EX, &f, &fd))
+        return -1;
+
+    // Escape message
+    char escaped_msg[INBUF_SIZE];
+    escape_message(message, escaped_msg, sizeof(escaped_msg));
+
+    // Lấy timestamp
+    time_t now = time(NULL);
+
+    // Format from_user với prefix GROUP để phân biệt
+    char group_from[USERNAME_LEN + 50];
+    snprintf(group_from, sizeof(group_from), "GROUP:%s:%s", group_id, from_user);
+
+    // Ghi vào file
+    int rc = fprintf(f, "%s|%s|%ld|%s\n", to_user, group_from, (long)now, escaped_msg);
+
+    if (rc < 0 || fflush(f) != 0)
+    {
+        flock(fd, LOCK_UN);
+        fclose(f);
+        return -1;
+    }
+
+    flock(fd, LOCK_UN);
+    fclose(f);
+    return 0;
+}
+
 // Gửi tất cả tin nhắn offline cho user
 int offline_deliver_messages(const char *username, int fd)
 {
@@ -149,12 +187,12 @@ int offline_deliver_messages(const char *username, int fd)
     while (fgets(buf, sizeof(buf), f))
     {
         char to_user[USERNAME_LEN];
-        char from_user[USERNAME_LEN];
+        char from_user[USERNAME_LEN + 50]; // Tăng size để chứa GROUP:xxx:yyy
         long timestamp;
         char escaped_msg[INBUF_SIZE];
 
         // Parse line: to_user|from_user|timestamp|message
-        int parsed = sscanf(buf, "%49[^|]|%49[^|]|%ld|%[^\n]", to_user, from_user, &timestamp, escaped_msg);
+        int parsed = sscanf(buf, "%49[^|]|%99[^|]|%ld|%[^\n]", to_user, from_user, &timestamp, escaped_msg);
 
         if (parsed == 4 && strcmp(to_user, username) == 0)
         {
@@ -162,10 +200,34 @@ int offline_deliver_messages(const char *username, int fd)
             char unescaped_msg[INBUF_SIZE];
             unescape_message(escaped_msg, unescaped_msg, sizeof(unescaped_msg));
 
-            // Format và gửi tin nhắn
+            // Kiểm tra xem có phải group message không
             char formatted[INBUF_SIZE + 100];
-            int n = snprintf(formatted, sizeof(formatted),
+            int n = 0;
+
+            if (strncmp(from_user, "GROUP:", 6) == 0)
+            {
+                // Format: GROUP:group_id:actual_from_user
+                char group_id[USERNAME_LEN];
+                char actual_from[USERNAME_LEN];
+
+                if (sscanf(from_user, "GROUP:%49[^:]:%49s", group_id, actual_from) == 2)
+                {
+                    n = snprintf(formatted, sizeof(formatted),
+                                 "[Offline Group %s - %s] %s\n", group_id, actual_from, unescaped_msg);
+                }
+                else
+                {
+                    // Fallback nếu parse lỗi
+                    n = snprintf(formatted, sizeof(formatted),
+                                 "[Offline Group] %s\n", unescaped_msg);
+                }
+            }
+            else
+            {
+                // Private message thông thường
+                n = snprintf(formatted, sizeof(formatted),
                              "[Offline PM from %s] %s\n", from_user, unescaped_msg);
+            }
 
             if (n > 0 && (size_t)n < sizeof(formatted))
             {

@@ -5,6 +5,20 @@
 #include "../offline/offline.h"
 #include "../log/log.h"
 
+// --- Helper Struct & Callback cho GROUPMSG ---
+
+// 1. Định nghĩa struct để chứa dữ liệu truyền vào callback
+typedef struct
+{
+    const char *group_id;
+    const char *from_user;
+    const char *message;
+    const char *formatted_msg;
+    Client *sender;
+    int sent_count;
+    int offline_count;
+} GroupMsgData;
+
 static void send_text(int fd, const char *msg)
 {
     int len = strlen(msg);
@@ -29,6 +43,34 @@ static int group_member_filter(const char *username, void *userdata)
     const char *group_id = (const char *)userdata;
     return group_check_member(group_id, username);
 }
+
+// 2. Đưa hàm callback ra ngoài (File scope)
+static void send_or_save_group_msg(const char *member, void *userdata)
+{
+    GroupMsgData *data = (GroupMsgData *)userdata;
+
+    // Không gửi lại cho chính người gửi
+    if (strcmp(member, data->from_user) == 0)
+        return;
+
+    Client *dst = client_by_username(member);
+    if (dst)
+    {
+        // Member đang online, gửi ngay
+        send(dst->fd, data->formatted_msg, strlen(data->formatted_msg), 0);
+        data->sent_count++;
+    }
+    else
+    {
+        // Member offline, lưu tin nhắn
+        if (offline_save_group_message(member, data->group_id, data->from_user, data->message) == 0)
+        {
+            data->offline_count++;
+        }
+    }
+}
+
+// --- Main Protocol Handler ---
 
 void protocol_handle(Client *c, const char *line)
 {
@@ -141,7 +183,7 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    // FRIEND
+    // FRIEND COMMANDS
     if (!strcmp(cmd, "ADDFRIEND"))
     {
         if (!c->logged_in)
@@ -175,7 +217,6 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Friend request sent\n");
             log_friend_action(c->username, "REQUEST", u);
 
-            // nếu user đang online, push notify (optional)
             Client *dst = client_by_username(u);
             if (dst)
             {
@@ -199,6 +240,7 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Add friend failed\n");
         return;
     }
+
     if (!strcmp(cmd, "ACCEPT"))
     {
         if (!c->logged_in)
@@ -245,6 +287,7 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Accept failed\n");
         return;
     }
+
     if (!strcmp(cmd, "REJECT"))
     {
         if (!c->logged_in)
@@ -278,6 +321,7 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Reject failed\n");
         return;
     }
+
     if (!strcmp(cmd, "UNFRIEND"))
     {
         if (!c->logged_in)
@@ -317,6 +361,7 @@ void protocol_handle(Client *c, const char *line)
             send_text(c->fd, "Unfriend failed\n");
         return;
     }
+
     if (!strcmp(cmd, "REQUESTS"))
     {
         if (!c->logged_in)
@@ -330,6 +375,7 @@ void protocol_handle(Client *c, const char *line)
         send_text(c->fd, out);
         return;
     }
+
     if (!strcmp(cmd, "FRIENDS"))
     {
         if (!c->logged_in)
@@ -344,6 +390,7 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
+    // MSGTO COMMAND
     if (!strcmp(cmd, "MSGTO"))
     {
         if (!c->logged_in)
@@ -361,7 +408,6 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Không cho tự nhắn cho chính mình
         if (strcmp(target, c->username) == 0)
         {
             send_text(c->fd, "Cannot send message to yourself\n");
@@ -371,8 +417,6 @@ void protocol_handle(Client *c, const char *line)
         Client *dst = client_by_username(target);
         if (!dst)
         {
-            // User không online, lưu tin nhắn offline
-            // Kiểm tra xem user có tồn tại không
             if (!account_exists(target))
             {
                 send_text(c->fd, "User does not exist\n");
@@ -391,16 +435,14 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Kiểm tra độ dài message
         size_t msglen = strlen(msg);
-        size_t max_msg_len = INBUF_SIZE - 100; // Dành chỗ cho prefix
+        size_t max_msg_len = INBUF_SIZE - 100;
         if (msglen > max_msg_len)
         {
             send_text(c->fd, "Message too long\n");
             return;
         }
 
-        // Format tin nhắn riêng cho người nhận
         char to_dst[INBUF_SIZE];
         int n = snprintf(to_dst, sizeof(to_dst), "[PM from %s] %s\n", c->username, msg);
         if (n < 0 || (size_t)n >= sizeof(to_dst))
@@ -409,13 +451,9 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Gửi cho người nhận
         send_text(dst->fd, to_dst);
-
-        // Log message
         log_message(c->username, target, "PM");
 
-        // Xác nhận cho người gửi
         char to_sender[INBUF_SIZE];
         snprintf(to_sender, sizeof(to_sender), "[PM to %s] %s\n", target, msg);
         send_text(c->fd, to_sender);
@@ -425,8 +463,6 @@ void protocol_handle(Client *c, const char *line)
 
     // ========== GROUP COMMANDS ==========
 
-    // Command: CREATEGROUP <group_name>
-    // Tạo nhóm chat mới với tên được chỉ định
     if (!strcmp(cmd, "CREATEGROUP"))
     {
         if (!c->logged_in)
@@ -442,7 +478,6 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Xóa khoảng trắng đầu/cuối
         while (*gname == ' ')
             gname++;
         int len = strlen(gname);
@@ -478,8 +513,6 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    // Command: ADDMEMBER <group_id> <username>
-    // Thêm thành viên vào nhóm (chỉ OWNER mới được phép)
     if (!strcmp(cmd, "ADDMEMBER"))
     {
         if (!c->logged_in)
@@ -507,7 +540,6 @@ void protocol_handle(Client *c, const char *line)
             snprintf(log_details, sizeof(log_details), "group=%s member=%s", gid, target);
             log_group_action(c->username, "ADD_MEMBER", log_details);
 
-            // Thông báo cho thành viên được thêm vào nếu đang online
             Client *dst = client_by_username(target);
             if (dst)
             {
@@ -516,7 +548,6 @@ void protocol_handle(Client *c, const char *line)
                 send_text(dst->fd, note);
             }
 
-            // Thông báo cho các thành viên khác trong nhóm
             char notify[256];
             snprintf(notify, sizeof(notify), "[Server] %s was added to group %s\n", target, gid);
             clients_broadcast_to_group(notify, dst, group_member_filter, (void *)gid);
@@ -533,8 +564,6 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    // Command: REMOVEMEMBER <group_id> <username>
-    // Xóa thành viên khỏi nhóm (chỉ OWNER mới được phép)
     if (!strcmp(cmd, "REMOVEMEMBER"))
     {
         if (!c->logged_in)
@@ -562,7 +591,6 @@ void protocol_handle(Client *c, const char *line)
             snprintf(log_details, sizeof(log_details), "group=%s member=%s", gid, target);
             log_group_action(c->username, "REMOVE_MEMBER", log_details);
 
-            // Thông báo cho thành viên bị xóa nếu đang online
             Client *dst = client_by_username(target);
             if (dst)
             {
@@ -571,7 +599,6 @@ void protocol_handle(Client *c, const char *line)
                 send_text(dst->fd, note);
             }
 
-            // Thông báo cho các thành viên còn lại trong nhóm
             char notify[256];
             snprintf(notify, sizeof(notify), "[Server] %s was removed from group %s\n", target, gid);
             clients_broadcast_to_group(notify, NULL, group_member_filter, (void *)gid);
@@ -586,8 +613,6 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    // Command: LEAVEGROUP <group_id>
-    // Rời khỏi nhóm chat
     if (!strcmp(cmd, "LEAVEGROUP"))
     {
         if (!c->logged_in)
@@ -609,7 +634,6 @@ void protocol_handle(Client *c, const char *line)
         {
             send_text(c->fd, "Left group successfully\n");
 
-            // Thông báo cho các thành viên còn lại trong nhóm
             char notify[256];
             snprintf(notify, sizeof(notify), "[Server] %s left group %s\n", c->username, gid);
             clients_broadcast_to_group(notify, c, group_member_filter, (void *)gid);
@@ -623,7 +647,6 @@ void protocol_handle(Client *c, const char *line)
     }
 
     // Command: GROUPMSG <group_id> <message>
-    // Gửi tin nhắn đến tất cả thành viên trong nhóm
     if (!strcmp(cmd, "GROUPMSG"))
     {
         if (!c->logged_in)
@@ -657,24 +680,41 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Gửi tin nhắn đến tất cả thành viên online (trừ người gửi)
-        // Sử dụng wrapper function để check membership
-        int sent_count = clients_broadcast_to_group(group_msg, c,
-                                                    group_member_filter, (void *)gid);
+        // 3. Sử dụng struct tường minh thay vì khai báo nested struct/function
+        GroupMsgData gdata;
+        gdata.group_id = gid;
+        gdata.from_user = c->username;
+        gdata.message = msg;
+        gdata.formatted_msg = group_msg;
+        gdata.sender = c;
+        gdata.sent_count = 0;
+        gdata.offline_count = 0;
+
+        // Gọi hàm callback static đã định nghĩa ở trên
+        group_foreach_member(gid, send_or_save_group_msg, &gdata);
 
         // Log group message
         log_message(c->username, gid, "GROUP");
 
         // Xác nhận cho người gửi
         char confirm[256];
-        snprintf(confirm, sizeof(confirm), "[Group %s] Message sent to %d online member(s)\n", gid, sent_count);
+        if (gdata.offline_count > 0)
+        {
+            snprintf(confirm, sizeof(confirm),
+                     "[Group %s] Sent to %d online, saved for %d offline member(s)\n",
+                     gid, gdata.sent_count, gdata.offline_count);
+        }
+        else
+        {
+            snprintf(confirm, sizeof(confirm),
+                     "[Group %s] Message sent to %d online member(s)\n",
+                     gid, gdata.sent_count);
+        }
         send_text(c->fd, confirm);
 
         return;
     }
 
-    // Command: LISTGROUPS
-    // Xem danh sách các nhóm mà user đang tham gia
     if (!strcmp(cmd, "LISTGROUPS"))
     {
         if (!c->logged_in)
@@ -694,8 +734,6 @@ void protocol_handle(Client *c, const char *line)
         return;
     }
 
-    // Command: GROUPINFO <group_id>
-    // Xem danh sách thành viên của nhóm
     if (!strcmp(cmd, "GROUPINFO"))
     {
         if (!c->logged_in)
@@ -711,7 +749,6 @@ void protocol_handle(Client *c, const char *line)
             return;
         }
 
-        // Kiểm tra xem user có phải thành viên không
         if (!group_check_member(gid, c->username))
         {
             send_text(c->fd, "You are not a member of this group\n");

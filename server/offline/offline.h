@@ -6,6 +6,9 @@
 // Lưu tin nhắn offline khi người nhận không online
 int offline_save_message(const char *to_user, const char *from_user, const char *message);
 
+// Lưu tin nhắn group cho một member offline
+int offline_save_group_message(const char *to_user, const char *group_id, const char *from_user, const char *message);
+
 // Gửi tất cả tin nhắn offline cho user khi họ login
 // Trả về số tin nhắn đã gửi
 int offline_deliver_messages(const char *username, int fd);
