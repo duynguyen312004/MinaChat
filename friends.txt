@@ -1,2 +1,0 @@
-alice|bob|FRIEND
-alice|duy|FRIEND
